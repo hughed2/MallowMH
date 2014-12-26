@@ -3,10 +3,6 @@ import itertools
 import numpy
 
 n = 1000            #The number of voters
-k = 10               #The number of candidates
-phi = 0.2           #Mallow's phi parameter
-
-kt2 = 0             #For stats
 
 #This function credit to Shashank on Stackoverflow
 #http://stackoverflow.com/questions/19372991/number-of-n-element-permutations-with-exactly-k-inversions
@@ -48,11 +44,8 @@ def kendalltau(x,y):
             distance = distance + 1
     return distance
 
-#Given an array and a pref table, calculate the tau distance
-def lorax(v, D):
-    global kt2 #For stats
-    kt2+= 1
-    
+#Kendall tau given a table rather than an array
+def kendalltau_table(v, D):
     distance = 0
     for i in itertools.combinations(v,2):
         distance = distance + D[i[1]][i[0]]
@@ -102,57 +95,128 @@ def calc_prefs(ground, n, phi):
             
     return pref_table
 
-#Given a preference table, run the M-H algorithm
-def metropolis_hastings(pref_table, phi):
-    t = 0
-    cache = {}
-    
+class metropolis_hastings:
 
-    #Start with a random x0
-    x = range(k)
-    random.shuffle(x)
+    params = {}
 
-    kt_x = lorax(x, pref_table)
-    cache[repr(x)] = kt_x
-
-    #Perform a random walk
-    while t < pow(k-2, 2) * 1.8:
-        t = t + 1
-
-        #Calculate x' by swapping pair of neighbors
-        swap = random.randint(0,k-2)
+    #Transition function. Randomly chooses a pair of neighbors to swap
+    def transition_swap_neighbors(self, x):
+        swap = random.randint(0, len(x)-2)
         x_p = list(x)
         x_p[swap + 1], x_p[swap] = x_p[swap], x_p[swap + 1]
-        
-        #Calculate the acceptance rate and determine whether to step
-        if(repr(x_p) in cache):
-            kt_x_p = cache[repr(x_p)]
-        else:
-            kt_x_p = lorax(x_p, pref_table)
-            cache[repr(x_p)] = kt_x_p
-        if(kt_x_p < kt_x or random.random() < pow(phi, kt_x_p - kt_x)):
-            x = x_p
-            kt_x = kt_x_p
+        return x_p
 
-    return kendalltau(ground, x)
+    #Determines whether to move to x_p or not
+    #Standard implementation would have the distribution zero out when kt distance gets too high
+    #So instead of probabilities, we use the kendall-tau distance. Need to adapt here.
+    def move_kendalltau(self, kt_x, kt_x_p):
+        phi = params["phi"]
+        if(kt_x_p < kt_x): #Always move if 
+            return True
+        if(random.random() < pow(phi, kt_x_p - kt_x)):
+            return True
+        return False
+
+    #The default function uses actual probabilities
+    def move_default(self, prob_x, prob_x_p):
+        if(prob_x_p > prob_x):
+            return True
+        if(random.random() < prob_x_p / prob_x):
+            return True
+        return False
+
+    def get_random_L(self, k):
+        x = range(k)
+        random.shuffle(x)
+        return x
+
+    def get_random_B(self, k):
+        x = [[0 for i in range(k)] for j in range(k)] #Create blank matrix
+        for i in range(0, k-1):
+            for j in range(i+1, k):
+                x[i][j] = random.random() > 0.5
+        return x
+
+    #Set various parameters
+    def set_transitions(self, function):
+        functions = {"swap_neighbors" : self.transition_swap_neighbors}
+        self.transition = functions[function]
+
+    def set_loss(self, function):
+        functions = {"kendall-tau" : kendalltau}
+        self.loss = functions[function]
+
+    def set_distribution(self, function):
+        functions = {"kendall-tau": kendalltau_table}
+        self.distribution = functions[function]
+
+    def set_move(self, function):
+        functions = {"default" : self.move_default, "kendall-tau" : self.move_kendalltau}
+        self.should_move = functions[function]
+
+    def set_random(self, function):
+        functions = {"L(C)" : self.get_random_L, "B(C)" : self.get_random_B}
+        self.get_random = functions[function]
+
+    transition = transition_swap_neighbors
+    loss = kendalltau
+    distribution = kendalltau_table
+    should_move = move_kendalltau
+    get_random = get_random_L
+
+    #Given a preference table, run the M-H algorithm
+    def approximate(self, preferences, k, parameters, trans_f="swap_neighbors", loss_f="kendall-tau",
+                                                dist_f="kendall-tau", space="L(C)"):
+        self.set_transitions(trans_f) #Set all of our parameters and functions
+        self.set_loss(loss_f)
+        self.set_distribution(dist_f)
+        if(dist_f == "kendall-tau"):
+            self.set_move("kendall-tau")
+        else:
+            self.set_move("default")
+        self.set_random(space)
+        
+
+        self.params = parameters
+
+        
+        t = 0
+
+        #Start with a random x0
+        x = self.get_random(k)
+
+        prob_x = self.distribution(x, preferences)
+
+        #Perform a random walk
+        while t < pow(k-2, 2) * 1.8:
+            t = t + 1
+
+            #Calculate x'
+            x_p = self.transition(x)
+            
+            #Calculate the acceptance rate and determine whether to step
+            prob_x_p = self.distribution(x_p, preferences)
+            if(self.should_move(prob_x, prob_x_p)):
+                (x, prob_x) = (x_p, prob_x_p)
+
+        return self.loss(ground, x)
+
         
 if __name__ == "__main__":
 
+    MH = metropolis_hastings()
+
     for k in range(3, 26):
-        for phi in [0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9]:
-            t_vals = []
-            kt2_vals = []
+        for phi in [0.1,0.2,0.3,0.4,0.5]:
             k_dist = []
             ground = range(k)
             for iter in range(100):
-                last_kt2 = kt2 #For stats
-
                 #We need to calaculate voters first
                 pref_table = calc_prefs(ground, n, phi)
 
                 #Now we can run Metropolis-Hastings
-                k_dist.append(metropolis_hastings(pref_table, phi))
-                kt2_vals.append(kt2 - last_kt2)
+                params = {"phi" : phi}
+                k_dist.append(MH.approximate(pref_table, k, params))
 
             #k, phi, mean KT distance, std KT distance, and absolute number resulting in ground truth    
             print k, phi, sum(k_dist)/100.0, numpy.std(numpy.array(k_dist)), k_dist.count(0)
